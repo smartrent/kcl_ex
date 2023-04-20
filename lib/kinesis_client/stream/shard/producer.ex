@@ -51,7 +51,7 @@ defmodule KinesisClient.Stream.Shard.Producer do
       stream_name: opts[:stream_name],
       status: opts[:status],
       app_state_opts: Keyword.get(opts, :app_state_opts, []),
-      shard_iterator_type: Keyword.get(opts, :shard_iterator_type, :trim_horizon),
+      shard_iterator_type: Keyword.get(opts, :shard_iterator_type, :latest),
       poll_interval: Keyword.get(opts, :poll_interval, 5_000),
       notify_pid: Keyword.get(opts, :notify_pid)
     }
@@ -197,7 +197,7 @@ defmodule KinesisClient.Stream.Shard.Producer do
             state
             | status: :started,
               shard_iterator: nil,
-              shard_iterator_type: :trim_horizon
+              shard_iterator_type: :latest
           })
 
         %{checkpoint: seq_number} when is_binary(seq_number) ->
@@ -279,6 +279,15 @@ defmodule KinesisClient.Stream.Shard.Producer do
       state.stream_name,
       state.shard_id,
       :trim_horizon,
+      state.kinesis_opts
+    )
+  end
+  
+    defp get_shard_iterator(%{shard_iterator_type: :latest} = state) do
+    Kinesis.get_shard_iterator(
+      state.stream_name,
+      state.shard_id,
+      :latest,
       state.kinesis_opts
     )
   end
