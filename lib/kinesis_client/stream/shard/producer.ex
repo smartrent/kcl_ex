@@ -283,7 +283,7 @@ defmodule KinesisClient.Stream.Shard.Producer do
     )
   end
   
-    defp get_shard_iterator(%{shard_iterator_type: :latest} = state) do
+  defp get_shard_iterator(%{shard_iterator_type: :latest} = state) do
     Kinesis.get_shard_iterator(
       state.stream_name,
       state.shard_id,
