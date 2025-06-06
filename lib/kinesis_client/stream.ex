@@ -1,11 +1,13 @@
 defmodule KinesisClient.Stream do
   @moduledoc """
   This is the entry point for processing the shards of a Kinesis Data Stream.
+
+  This implementation follows the KCL 3.x architecture with centralized, leader-based
+  lease management and optimized shard synchronization.
   """
   use Supervisor
   require Logger
   import KinesisClient.Util
-  alias KinesisClient.Stream.Coordinator
 
   @doc """
   Starts a `KinesisClient.Stream` process.
@@ -23,6 +25,16 @@ defmodule KinesisClient.Stream do
     * `:lease_expiry`(optional) - The lenght of time in milliseconds that least lasts for. If a
       lease is not renewed within this time frame, then that lease is considered expired and can be
       taken by another process.
+    * `:sync_interval`(optional) - The interval in milliseconds between periodic shard sync operations.
+      Defaults to 60,000 (60 seconds).
+    * `:assignment_interval`(optional) - The interval in milliseconds between lease assignment operations.
+      Defaults to 30,000 (30 seconds).
+    * `:rebalance_threshold_percent`(optional) - Percentage threshold for triggering lease rebalancing.
+      Defaults to 10%.
+    * `:dampening_percent`(optional) - Dampening factor to prevent oscillation during rebalancing.
+      Defaults to 80%.
+    * `:metrics_collection_interval`(optional) - Interval for collecting worker metrics in milliseconds.
+      Defaults to 5,000 (5 seconds).
   """
   def start_link(opts) do
     Supervisor.start_link(__MODULE__, opts, name: Keyword.get(opts, :name, __MODULE__))
@@ -31,16 +43,15 @@ defmodule KinesisClient.Stream do
   def init(opts) do
     stream_name = get_stream_name(opts)
     app_name = get_app_name(opts)
-    worker_ref = "worker-#{:rand.uniform(10_000)}"
+    KinesisClient.Stream.AppState.initialize(app_name)
+    worker_id = "worker-#{:rand.uniform(10_000)}@#{Node.self()}"
     {shard_supervisor_spec, shard_supervisor_name} = get_shard_supervisor(opts)
-    coordinator_name = get_coordinator_name(opts)
     shard_consumer = get_shard_consumer(opts)
 
     shard_args = [
       app_name: opts[:app_name],
-      coordinator_name: coordinator_name,
       stream_name: stream_name,
-      lease_owner: worker_ref,
+      lease_owner: worker_id,
       shard_consumer: shard_consumer,
       processors: opts[:processors],
       batchers: opts[:batchers]
@@ -52,35 +63,36 @@ defmodule KinesisClient.Stream do
       |> optional_kw(:lease_renew_interval, Keyword.get(opts, :lease_renew_interval))
       |> optional_kw(:lease_expiry, Keyword.get(opts, :lease_expiry))
 
-    coordinator_args = [
-      name: coordinator_name,
-      stream_name: stream_name,
+    common_args = [
       app_name: app_name,
+      worker_id: worker_id,
+      stream_name: stream_name,
       app_state_opts: Keyword.get(opts, :app_state_opts, []),
-      shard_supervisor_name: shard_supervisor_name,
-      worker_ref: worker_ref,
-      shard_args: shard_args
+      dynamo_opts: Keyword.get(opts, :dynamo_opts, [])
     ]
+
+    shard_manager_args =
+      Keyword.merge(common_args,
+        shard_supervisor_name: shard_supervisor_name,
+        shard_args: shard_args
+      )
+
+    syncer_args =
+      Keyword.merge(common_args,
+        kinesis_stream_name: stream_name,
+        dynamo_table_name: app_name
+      )
 
     children = [
+      {KinesisClient.Telemetry, []},
+      {KinesisClient.LeaderElection.Supervisor, common_args},
+      {KinesisClient.WorkerRegistrySupervisor, common_args},
       shard_supervisor_spec,
-      {Coordinator, coordinator_args}
+      {KinesisClient.Lease.Supervisor, syncer_args},
+      {KinesisClient.Stream.ShardManager, shard_manager_args}
     ]
 
-    Logger.debug(
-      "Starting KinesisClient.Stream: [app_name: #{app_name}, stream_name: {stream_name}]"
-    )
-
-    Supervisor.init(children, strategy: :one_for_all)
-  end
-
-  defp get_coordinator_name(opts) do
-    case Keyword.get(opts, :shard_supervisor) do
-      nil -> Module.concat(KinesisClient.Stream.Coordinator, opts[:stream_name])
-      # Shard processes may be running on nodes different from the Coordinator if passed
-      # :shard_supervisor is distributed,so use :global to allow inter-node communication.
-      _ -> {:global, Module.concat(KinesisClient.Stream.Coordinator, opts[:stream_name])}
-    end
+    Supervisor.init(children, strategy: :one_for_one)
   end
 
   defp get_stream_name(opts) do
