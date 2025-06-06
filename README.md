@@ -57,7 +57,7 @@ you're at, as opposed to ack-ing individual messages like you can with SQS.
 Increase the number of shards if you want to increase processing throughput.
 
 If increasing the number of shards is not possible or desirable, I would
-recommend fanning out in the `handle_batch/4` callback of your shard consumer. 
+recommend fanning out in the `handle_batch/4` callback of your shard consumer.
 Configuring dead letter queues and partitioning are dependent on your
 application's requirements and the structure of your data.
 
@@ -72,8 +72,13 @@ doing it currently:
 SERVICES=kinesis,dynamodb localstack start --host
 ```
 
+You can also use Docker Compose for local development or running tests:
+```
+docker compose up -d
+AWS_ACCESS_KEY_ID=dummy AWS_SECRET_ACCESS_KEY=dummy mix test
+```
+
 ## TODO
 - [ ] Test shard merges and splits more thoroughly
 - [ ] Implement a work stealing algorithim to help distribute the load among
   different Elixir nodes processing the same app.
-
