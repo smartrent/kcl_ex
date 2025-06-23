@@ -1,10 +1,9 @@
 defmodule KinesisClient.HierarchicalShardSyncer.Task do
   @moduledoc """
-  Supervisor for the leader election components in KinesisClient.
+  GenServer task for hierarchical shard synchronization.
 
-  This supervisor ensures that the leader election process stays alive
-  and properly restarts if it fails. This follows KCL 3.x's approach to
-  leader election management.
+  Periodically synchronizes shard hierarchy from Kinesis stream
+  following KCL 3.x approach.
   """
   use GenServer
   require Logger
@@ -23,9 +22,12 @@ defmodule KinesisClient.HierarchicalShardSyncer.Task do
 
   @impl GenServer
   def init(opts) do
+    config = Keyword.fetch!(opts, :config)
+
     state = %{
       kinesis_stream_name: opts[:kinesis_stream_name],
-      dynamo_table_name: opts[:dynamo_table_name]
+      dynamo_table_name: opts[:dynamo_table_name],
+      config: config
     }
 
     {:ok, state, {:continue, :initialize}}
@@ -44,7 +46,7 @@ defmodule KinesisClient.HierarchicalShardSyncer.Task do
       state.dynamo_table_name
     )
 
-    Process.send_after(self(), :sync_shards, 5_000)
+    Process.send_after(self(), :sync_shards, state.config[:shard_sync_interval_ms])
     {:noreply, state}
   end
 

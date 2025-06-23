@@ -1,10 +1,9 @@
 defmodule KinesisClient.Lease.Supervisor do
   @moduledoc """
-  Supervisor for the leader election components in KinesisClient.
+  Supervisor for lease management components in KinesisClient.
 
-  This supervisor ensures that the leader election process stays alive
-  and properly restarts if it fails. This follows KCL 3.x's approach to
-  leader election management.
+  Manages hierarchical shard syncing, lease refreshing, and coordination
+  following KCL 3.x approach.
   """
   use Supervisor
   require Logger
@@ -27,7 +26,7 @@ defmodule KinesisClient.Lease.Supervisor do
     app_name = Keyword.fetch!(opts, :kinesis_stream_name)
     worker_id = Keyword.fetch!(opts, :worker_id)
 
-    Logger.info("Starting leader election supervisor for #{app_name} with worker #{worker_id}")
+    Logger.info("Starting lease supervisor for #{app_name} with worker #{worker_id}")
 
     children = [
       # Leader election process with restart strategy

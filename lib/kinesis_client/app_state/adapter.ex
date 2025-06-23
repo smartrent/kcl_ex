@@ -38,7 +38,6 @@ defmodule KinesisClient.Stream.AppState.Adapter do
               app_name :: String.t(),
               shard_id :: String.t(),
               new_owner :: String.t(),
-              lease_count :: integer | nil,
               opts :: Keyword.t(),
               lease_status :: String.t()
             ) :: {:ok, integer} | {:error, atom} | {:error, atom, String.t()}
@@ -46,8 +45,7 @@ defmodule KinesisClient.Stream.AppState.Adapter do
   @callback close_shard(
               app_name :: String.t(),
               shard_id :: String.t(),
-              lease_owner :: String.t(),
-              opts :: Keyword.t()
+              lease_owner :: String.t()
             ) :: :ok | {:error, :lease_owner_match} | {:error, any}
 
   @callback list_all_leases(app_name :: String.t()) ::

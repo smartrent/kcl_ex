@@ -41,6 +41,59 @@ defmodule KinesisClient.Stream do
   end
 
   def init(opts) do
+    config = [
+      leader_lease_duration_ms:
+        opts[:leader_lease_duration_ms] ||
+          Application.get_env(:kinesis_client, :leader_lease_duration_ms, 30_000),
+      leader_heartbeat_interval_ms:
+        opts[:leader_heartbeat_interval_ms] ||
+          Application.get_env(:kinesis_client, :leader_heartbeat_interval_ms, 3_000),
+      leader_takeover_grace_period_ms:
+        opts[:leader_takeover_grace_period_ms] ||
+          Application.get_env(:kinesis_client, :leader_takeover_grace_period_ms, 5_004),
+      leader_max_consecutive_failures:
+        opts[:leader_max_consecutive_failures] ||
+          Application.get_env(:kinesis_client, :leader_max_consecutive_failures, 3),
+      worker_heartbeat_interval_ms:
+        opts[:worker_heartbeat_interval_ms] ||
+          Application.get_env(:kinesis_client, :worker_heartbeat_interval_ms, 5_000),
+      worker_cleanup_interval_ms:
+        opts[:worker_cleanup_interval_ms] ||
+          Application.get_env(:kinesis_client, :worker_cleanup_interval_ms, 30_000),
+      worker_timeout_ms:
+        opts[:worker_timeout_ms] || Application.get_env(:kinesis_client, :worker_timeout_ms, 60_000),
+      lease_take_interval_ms:
+        opts[:lease_take_interval_ms] ||
+          Application.get_env(:kinesis_client, :lease_take_interval_ms, 20_000),
+      lease_renew_interval_ms:
+        opts[:lease_renew_interval_ms] ||
+          Application.get_env(:kinesis_client, :lease_renew_interval_ms, 10_000),
+      lease_assignment_interval_ms:
+        opts[:lease_assignment_interval_ms] ||
+          Application.get_env(:kinesis_client, :lease_assignment_interval_ms, 60_000),
+      lease_check_interval_ms:
+        opts[:lease_check_interval_ms] ||
+          Application.get_env(:kinesis_client, :lease_check_interval_ms, 5_000),
+      shard_poll_interval_ms:
+        opts[:shard_poll_interval_ms] ||
+          Application.get_env(:kinesis_client, :shard_poll_interval_ms, 5_000),
+      system_health_check_interval_ms:
+        opts[:system_health_check_interval_ms] ||
+          Application.get_env(:kinesis_client, :system_health_check_interval_ms, 30_000),
+      shard_sync_interval_ms:
+        opts[:shard_sync_interval_ms] ||
+          Application.get_env(:kinesis_client, :shard_sync_interval_ms, 60_000)
+    ]
+
+    case validate_config(config) do
+      :ok ->
+        :ok
+
+      {:error, errors} ->
+        Logger.error("Invalid KinesisClient configuration: #{Enum.join(errors, ", ")}")
+        raise ArgumentError, "Invalid configuration: #{Enum.join(errors, ", ")}"
+    end
+
     stream_name = get_stream_name(opts)
     app_name = get_app_name(opts)
     KinesisClient.Stream.AppState.initialize(app_name)
@@ -54,7 +107,8 @@ defmodule KinesisClient.Stream do
       lease_owner: worker_id,
       shard_consumer: shard_consumer,
       processors: opts[:processors],
-      batchers: opts[:batchers]
+      batchers: opts[:batchers],
+      config: config
     ]
 
     shard_args =
@@ -68,7 +122,8 @@ defmodule KinesisClient.Stream do
       worker_id: worker_id,
       stream_name: stream_name,
       app_state_opts: Keyword.get(opts, :app_state_opts, []),
-      dynamo_opts: Keyword.get(opts, :dynamo_opts, [])
+      dynamo_opts: Keyword.get(opts, :dynamo_opts, []),
+      config: config
     ]
 
     shard_manager_args =
@@ -85,6 +140,7 @@ defmodule KinesisClient.Stream do
 
     children = [
       {KinesisClient.Telemetry, []},
+      {KinesisClient.SystemHealth, common_args},
       {KinesisClient.LeaderElection.Supervisor, common_args},
       {KinesisClient.WorkerRegistrySupervisor, common_args},
       shard_supervisor_spec,
@@ -130,6 +186,57 @@ defmodule KinesisClient.Stream do
 
       _ ->
         raise ArgumentError, message: ":shard_processor option must be a module name"
+    end
+  end
+
+  defp get_config_with_defaults(opts) do
+  end
+
+  defp validate_config(config) do
+    errors = []
+
+    errors =
+      Enum.reduce(config, errors, fn {key, value}, acc ->
+        cond do
+          not is_integer(value) ->
+            ["#{key} must be an integer, got: #{inspect(value)}" | acc]
+
+          value <= 0 ->
+            ["#{key} must be positive, got: #{value}" | acc]
+
+          true ->
+            acc
+        end
+      end)
+
+    lease_renew = config[:lease_renew_interval_ms]
+    lease_take = config[:lease_take_interval_ms]
+    leader_heartbeat = config[:leader_heartbeat_interval_ms]
+    leader_lease = config[:leader_lease_duration_ms]
+
+    errors =
+      if lease_renew >= lease_take do
+        [
+          "lease_renew_interval_ms (#{lease_renew}) should be less than lease_take_interval_ms (#{lease_take})"
+          | errors
+        ]
+      else
+        errors
+      end
+
+    errors =
+      if leader_heartbeat >= leader_lease do
+        [
+          "leader_heartbeat_interval_ms (#{leader_heartbeat}) should be less than leader_lease_duration_ms (#{leader_lease})"
+          | errors
+        ]
+      else
+        errors
+      end
+
+    case errors do
+      [] -> :ok
+      errors -> {:error, errors}
     end
   end
 end

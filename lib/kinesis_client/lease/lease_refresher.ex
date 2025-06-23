@@ -10,11 +10,6 @@ defmodule KinesisClient.Stream.LeaseRefresher do
   require Logger
   alias KinesisClient.Stream.AppState
 
-  # Take leases every 20 seconds
-  @default_lease_take_interval 20_000
-  # Renew leases every 10 seconds
-  @default_lease_renew_interval 10_000
-
   # Client API
 
   @doc """
@@ -38,12 +33,14 @@ defmodule KinesisClient.Stream.LeaseRefresher do
     app_name = Keyword.fetch!(opts, :app_name)
     worker_id = Keyword.fetch!(opts, :worker_id)
     app_state_opts = Keyword.get(opts, :app_state_opts, [])
-    lease_take_interval = Keyword.get(opts, :lease_take_interval, @default_lease_take_interval)
-    lease_renew_interval = Keyword.get(opts, :lease_renew_interval, @default_lease_renew_interval)
+    config = Keyword.fetch!(opts, :config)
+    lease_take_interval = Keyword.get(opts, :lease_take_interval, config[:lease_take_interval_ms])
+
+    lease_renew_interval =
+      Keyword.get(opts, :lease_renew_interval, config[:lease_renew_interval_ms])
 
     Logger.info("Starting LeaseRefresher for #{app_name}, worker: #{worker_id}")
 
-    # Immediately schedule the first lease take and renewal operations
     renew_timer = schedule_lease_renewal(lease_renew_interval)
 
     {:ok,
@@ -64,27 +61,56 @@ defmodule KinesisClient.Stream.LeaseRefresher do
     Logger.info("Renewing leases for #{state.worker_id}", ansi_color: :green_background)
 
     if state.running do
-      # Cancel existing timer
       if state.renew_timer, do: Process.cancel_timer(state.renew_timer)
 
-      # Execute lease renewal
+      start_time = System.monotonic_time(:millisecond)
+
       results =
         renew_leases(
           state.app_name,
           state.worker_id
         )
 
-      # Log results
+      end_time = System.monotonic_time(:millisecond)
+      duration_ms = end_time - start_time
+
       success_count = length(results.success)
       failure_count = length(results.failure)
 
+      # Emit telemetry for lease renewal operations
+      :telemetry.execute(
+        [:kinesis_client, :lease, :renewal, :batch],
+        %{
+          duration_ms: duration_ms,
+          success_count: success_count,
+          failure_count: failure_count,
+          total_count: success_count + failure_count
+        },
+        %{
+          app_name: state.app_name,
+          worker_id: state.worker_id
+        }
+      )
+
       if failure_count > 0 do
         Logger.warning("Renewed #{success_count} leases, failed to renew #{failure_count} leases")
+
+        Enum.each(results.failure, fn shard_id ->
+          :telemetry.execute(
+            [:kinesis_client, :lease, :renewal, :failure],
+            %{count: 1},
+            %{
+              app_name: state.app_name,
+              worker_id: state.worker_id,
+              shard_id: shard_id,
+              reason: "renewal_failed"
+            }
+          )
+        end)
       else
         Logger.debug("Successfully renewed #{success_count} leases", ansi_color: :green)
       end
 
-      # Schedule next lease renewal
       renew_timer = schedule_lease_renewal(state.lease_renew_interval)
       {:noreply, %{state | renew_timer: renew_timer}}
     else
@@ -110,24 +136,19 @@ defmodule KinesisClient.Stream.LeaseRefresher do
   defp renew_leases(app_name, worker_id) do
     Logger.debug("Renewing leases for worker #{worker_id}")
 
-    # Get all leases currently held by this worker
     current_leases = AppState.list_worker_leases(app_name, worker_id)
 
-    # Track successful and failed renewals
     results = %{
       success: [],
       failure: []
     }
 
-    # Renew each lease
     Enum.reduce(current_leases, results, fn lease, acc ->
       case AppState.renew_lease(app_name, lease) do
         {:ok, _new_count} ->
-          # Successfully renewed lease
           %{acc | success: [lease.shard_id | acc.success]}
 
         {:error, _reason} ->
-          # Failed to renew lease
           Logger.warning("Failed to renew lease for shard #{lease.shard_id}")
           %{acc | failure: [lease.shard_id | acc.failure]}
 

@@ -14,13 +14,10 @@ defmodule KinesisClient.LeaseCoordinatorTest do
 
   describe "initialization" do
     test "initializes with default assignment interval" do
-      # Start the coordinator with minimal options
       {:ok, state} = LeaseCoordinator.init(app_name: @app_name, worker_id: @worker_id)
 
-      # Assert default values are set
       assert state.app_name == @app_name
       assert state.worker_id == @worker_id
-      # Default interval
       assert state.assignment_interval == 60_000
       assert state.last_assignment_at == nil
       assert state.consecutive_failures == 0
@@ -109,7 +106,7 @@ defmodule KinesisClient.LeaseCoordinatorTest do
       # Stub AppState to prevent actual DynamoDB interactions
       AppState
       |> stub(:list_all_leases, fn _ -> [] end)
-      |> stub(:take_lease, fn _, _, _, _, _, _ -> {:ok, %{}} end)
+      |> stub(:take_lease, fn _, _, _, _, _ -> {:ok, %{}} end)
 
       # Initial state
       state = %{
@@ -384,18 +381,16 @@ defmodule KinesisClient.LeaseCoordinatorTest do
 
       # Track assignment calls - each worker should get one lease
       AppState
-      |> expect(:take_lease, fn app_name, shard_id, worker_id, lease_count, _opts, lease_status ->
+      |> expect(:take_lease, fn app_name, shard_id, worker_id, _opts, lease_status ->
         assert app_name == @app_name
         assert lease_status == "LEASED"
-        assert lease_count == 1
         assert shard_id in ["shard-1", "shard-2"]
         assert worker_id in [@worker_id, "worker-2"]
         {:ok, %{}}
       end)
-      |> expect(:take_lease, fn app_name, shard_id, worker_id, lease_count, _opts, lease_status ->
+      |> expect(:take_lease, fn app_name, shard_id, worker_id, _opts, lease_status ->
         assert app_name == @app_name
         assert lease_status == "LEASED"
-        assert lease_count == 1
         assert shard_id in ["shard-1", "shard-2"]
         assert worker_id in [@worker_id, "worker-2"]
         # Make sure this worker gets a different shard than the first
@@ -455,10 +450,10 @@ defmodule KinesisClient.LeaseCoordinatorTest do
 
       # Simulate one success and one failure
       AppState
-      |> expect(:take_lease, fn _app_name, "shard-1", _worker_id, _lease_count, _opts, _status ->
+      |> expect(:take_lease, fn _app_name, "shard-1", _worker_id, _opts, _status ->
         {:ok, %{}}
       end)
-      |> expect(:take_lease, fn _app_name, "shard-2", _worker_id, _lease_count, _opts, _status ->
+      |> expect(:take_lease, fn _app_name, "shard-2", _worker_id, _opts, _status ->
         {:error, %{reason: "ConditionalCheckFailedException"}}
       end)
 
@@ -510,12 +505,7 @@ defmodule KinesisClient.LeaseCoordinatorTest do
 
       # Track assignment calls
       AppState
-      |> expect(:take_lease, fn _app_name,
-                                "shard-1",
-                                worker_id,
-                                _lease_count,
-                                _opts,
-                                lease_status ->
+      |> expect(:take_lease, fn _app_name, "shard-1", worker_id, _opts, lease_status ->
         assert worker_id == @worker_id
         assert lease_status == "LEASED"
         {:ok, %{}}

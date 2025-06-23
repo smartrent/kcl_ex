@@ -1,10 +1,6 @@
 defmodule KinesisClient.LeaderElection.Supervisor do
   @moduledoc """
   Supervisor for the leader election components in KinesisClient.
-
-  This supervisor ensures that the leader election process stays alive
-  and properly restarts if it fails. This follows KCL 3.x's approach to
-  leader election management.
   """
   use Supervisor
   require Logger
@@ -30,13 +26,9 @@ defmodule KinesisClient.LeaderElection.Supervisor do
     Logger.info("Starting leader election supervisor for #{app_name} with worker #{worker_id}")
 
     children = [
-      # Leader election process with restart strategy
       {KinesisClient.LeaderElection, opts}
     ]
 
-    # One-for-one ensures that if the leader election process crashes,
-    # it will be restarted without affecting other processes.
-    # We use a max_restarts of 5 in 60 seconds to prevent rapid restart loops.
     Supervisor.init(children,
       strategy: :one_for_one,
       max_restarts: 5,

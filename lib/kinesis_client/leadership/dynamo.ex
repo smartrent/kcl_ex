@@ -9,17 +9,14 @@ defmodule KinesisClient.Leadership.AppState.Dynamo do
 
   @impl true
   def put_leader_item(table_name, worker_id, current_time, opts) do
-    # The item we'll insert if we successfully acquire leadership
     item = %{
       "leader_key" => "primary",
       "worker_id" => worker_id,
       "last_update" => current_time
     }
 
-    # Leader lease duration in ms
     lease_duration_ms = 30_000
 
-    # For put_item with a conditional check
     put_opts = [
       condition_expression: "attribute_not_exists(leader_key) OR last_update < :expired_time",
       expression_attribute_values: %{
@@ -33,10 +30,8 @@ defmodule KinesisClient.Leadership.AppState.Dynamo do
 
   @impl true
   def update_leader_heartbeat(table_name, worker_id, current_time, opts) do
-    # Key of the item to update
     key = %{"leader_key" => "primary"}
 
-    # Update expression and conditions
     update_opts = [
       condition_expression: "worker_id = :worker_id",
       expression_attribute_values: %{

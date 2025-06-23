@@ -10,14 +10,11 @@ defmodule KinesisClient.Stream.AppState.Dynamo do
   def initialize(app_name, _opts) do
     case confirm_table_created(app_name) do
       :ok ->
-        # Table exists, now check if the GSI exists
         ensure_gsi_exists(app_name)
-        # Ensure all records have lease_status field
         migrate_lease_status_field(app_name)
 
       {:error, {"ResourceNotFoundException", _}} ->
         create_table(app_name)
-        # After creating the table, confirm the GSI exists
         ensure_gsi_exists(app_name)
     end
   end
@@ -101,18 +98,13 @@ defmodule KinesisClient.Stream.AppState.Dynamo do
   end
 
   @impl AppStateAdapter
-  def take_lease(app_name, shard_id, new_lease_owner, _lease_count, _opts, lease_status \\ "LEASED") do
-    # First, get the CURRENT state of the lease
+  def take_lease(app_name, shard_id, new_lease_owner, _opts, lease_status \\ "LEASED") do
     current_lease = get_lease(app_name, shard_id, [])
     current_time = System.system_time(:millisecond)
 
-    # Use the lease count from the current lease, not the passed-in one
-    # This is key for taking leases from down nodes
     actual_lease_count = current_lease.lease_count
     updated_count = actual_lease_count + 1
 
-    # Ensure consistency between lease_owner and lease_status
-    # If owner is CHILD_WAITING, status must also be CHILD_WAITING
     lease_status =
       cond do
         new_lease_owner == "CHILD_WAITING" -> "CHILD_WAITING"
@@ -120,25 +112,17 @@ defmodule KinesisClient.Stream.AppState.Dynamo do
         true -> lease_status
       end
 
-    # Special case: Skip reassigning CHILD_WAITING->CHILD_WAITING unnecessarily
-    # This prevents the noise in logs for no actual change
     if current_lease.lease_owner == "CHILD_WAITING" && new_lease_owner == "CHILD_WAITING" &&
          current_lease.lease_status == "CHILD_WAITING" do
-      # Skip modifying the lease - it's already in the correct state
-      # Just maintain the existing lease count to avoid unnecessary updates
       {:ok, actual_lease_count}
     else
-      # Continue with normal handling
-      # Check if the node is down or the lease is expired
       is_lease_expired = is_lease_expired?(current_lease, current_time, 30000)
       is_lease_balanced = current_lease.lease_owner != new_lease_owner
 
       if is_lease_expired || is_lease_balanced do
-        # KCL approach: Use the actual current lease count for the condition
         update_opt = [
           condition_expression: "lease_count = :lc",
           expression_attribute_values: %{
-            # Use the ACTUAL current count, not the one passed in
             lc: actual_lease_count,
             lo: new_lease_owner,
             new_lease_count: updated_count,
@@ -161,20 +145,17 @@ defmodule KinesisClient.Stream.AppState.Dynamo do
             {:ok, updated_count}
 
           {:error, {"ConditionalCheckFailedException", _}} ->
-            # Someone else might have taken the lease while we were trying
             {:error, :lease_take_failed, current_lease.lease_owner}
 
           reply ->
             reply
         end
       else
-        # Node is up and lease is not expired, don't try to take it
         {:error, :shard_already_claimed}
       end
     end
   end
 
-  # Helper function to check if a lease is expired
   defp is_lease_expired?(lease, current_time, expiry_ms) do
     case lease do
       %{last_renewal_time: nil} ->
@@ -190,10 +171,6 @@ defmodule KinesisClient.Stream.AppState.Dynamo do
 
   @impl AppStateAdapter
   def update_checkpoint(app_name, shard_id, lease_owner, checkpoint, _opts) do
-    Logger.debug(
-      "AppState.Dynamo updating checkpoint: [checkpoint: #{checkpoint}, shard_id: #{shard_id}]"
-    )
-
     update_opt = [
       condition_expression: "lease_owner = :lo",
       expression_attribute_values: %{
@@ -212,8 +189,7 @@ defmodule KinesisClient.Stream.AppState.Dynamo do
   end
 
   @impl AppStateAdapter
-  def close_shard(app_name, shard_id, lease_owner, _opts) do
-    # Update both completed=true AND lease_status="COMPLETED"
+  def close_shard(app_name, shard_id, lease_owner) do
     update_opt = [
       condition_expression: "lease_owner = :lo",
       expression_attribute_values: %{
@@ -418,7 +394,6 @@ defmodule KinesisClient.Stream.AppState.Dynamo do
   defp ensure_gsi_exists(app_name) do
     case ExAws.Dynamo.describe_table(app_name) |> ExAws.request() do
       {:ok, %{"Table" => %{"GlobalSecondaryIndexes" => gsis}}} ->
-        # Check if our specific GSI exists
         if Enum.any?(gsis, fn gsi -> gsi["IndexName"] == "LeaseStatusIndex" end) do
           Logger.info("GSI LeaseStatusIndex already exists for table #{app_name}")
           :ok
@@ -428,7 +403,6 @@ defmodule KinesisClient.Stream.AppState.Dynamo do
         end
 
       {:ok, %{"Table" => _}} ->
-        # Table exists but no GSIs, add our GSI
         Logger.warning("No GSIs found for table #{app_name}, adding LeaseStatusIndex")
         add_gsi_to_table(app_name)
 
@@ -470,7 +444,6 @@ defmodule KinesisClient.Stream.AppState.Dynamo do
     case ExAws.request(update_request) do
       {:ok, _} ->
         Logger.info("Successfully requested GSI creation for table #{app_name}")
-        # Wait for GSI to become active
         wait_for_gsi_active(app_name)
 
       {:error, {"ValidationException", "One or more parameter values were invalid: " <> _ = msg}} ->
@@ -488,7 +461,6 @@ defmodule KinesisClient.Stream.AppState.Dynamo do
     end
   end
 
-  # Wait for GSI to become active
   defp wait_for_gsi_active(app_name, retries \\ 10, delay \\ 2000) do
     if retries <= 0 do
       Logger.error("Timed out waiting for GSI to become active")

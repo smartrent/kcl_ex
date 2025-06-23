@@ -35,8 +35,8 @@ defmodule KinesisClient.Stream.AppState do
   def renew_lease(app_name, shard_lease),
     do: adapter([]).renew_lease(app_name, shard_lease)
 
-  def take_lease(app_name, shard_id, new_owner, lease_count, opts \\ [], lease_status \\ "LEASED"),
-    do: adapter(opts).take_lease(app_name, shard_id, new_owner, lease_count, opts, lease_status)
+  def take_lease(app_name, shard_id, new_owner, opts \\ [], lease_status \\ "LEASED"),
+    do: adapter(opts).take_lease(app_name, shard_id, new_owner, opts, lease_status)
 
   @doc """
   Marks a ShardLease as completed.
@@ -44,8 +44,8 @@ defmodule KinesisClient.Stream.AppState do
   This indicates that all records for the shard have been processed by the app. `KinesisClient.Stream.Shard`
   processes will not be started for ShardLease's that are completed.
   """
-  def close_shard(app_name, shard_id, lease_owner, opts \\ []),
-    do: adapter(opts).close_shard(app_name, shard_id, lease_owner, opts)
+  def close_shard(app_name, shard_id, lease_owner),
+    do: adapter([]).close_shard(app_name, shard_id, lease_owner)
 
   @doc """
   Lists all leases in the app's lease table.

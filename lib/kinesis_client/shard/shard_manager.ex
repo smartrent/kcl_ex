@@ -17,9 +17,6 @@ defmodule KinesisClient.Stream.ShardManager do
   alias KinesisClient.Stream.AppState
   alias KinesisClient.Stream.AppState.ShardLease
 
-  # Default polling interval for lease changes (5 seconds)
-  @default_poll_interval_ms 5_000
-
   # Client API
 
   @doc """
@@ -56,7 +53,8 @@ defmodule KinesisClient.Stream.ShardManager do
     worker_id = Keyword.fetch!(opts, :worker_id)
     shard_args = Keyword.fetch!(opts, :shard_args)
     app_state_opts = Keyword.get(opts, :app_state_opts, [])
-    poll_interval_ms = Keyword.get(opts, :poll_interval_ms, @default_poll_interval_ms)
+    config = Keyword.fetch!(opts, :config)
+    poll_interval_ms = Keyword.get(opts, :poll_interval_ms, config[:shard_poll_interval_ms])
 
     Logger.info("Starting ShardManager for #{app_name}")
 
@@ -71,11 +69,9 @@ defmodule KinesisClient.Stream.ShardManager do
       poll_timer: nil,
       # Map of %{monitor_ref => shard_id}
       shard_ref_map: %{},
-      # Track the leases we know about
       current_leases: %{}
     }
 
-    # Schedule first lease check
     poll_timer = schedule_lease_check(poll_interval_ms)
 
     {:ok, %{state | poll_timer: poll_timer}}
@@ -83,20 +79,16 @@ defmodule KinesisClient.Stream.ShardManager do
 
   @impl GenServer
   def handle_cast({:close_shard, shard_id}, state) do
-    # Mark the shard as closed in the app state
     case AppState.get_lease(state.app_name, shard_id, state.app_state_opts) do
       %{lease_owner: lease_owner} = lease when not is_nil(lease_owner) ->
         Logger.info("Marking shard #{shard_id} as completed")
-        AppState.close_shard(state.app_name, shard_id, lease_owner, state.app_state_opts)
+        AppState.close_shard(state.app_name, shard_id, lease_owner)
 
-        # Stop the shard process
         stop_shard(state.stream_name, shard_id)
 
-        # Update our internal state
         {ref, cleaned_map} = remove_shard_reference(shard_id, state.shard_ref_map)
         if ref, do: Process.demonitor(ref, [:flush])
 
-        # Update the current_leases to reflect the completion
         current_leases =
           Map.update(state.current_leases, shard_id, lease, fn l ->
             %{l | completed: true}
@@ -112,25 +104,20 @@ defmodule KinesisClient.Stream.ShardManager do
 
   @impl GenServer
   def handle_info(:check_lease_changes, state) do
-    # Execute the lease check and schedule the next one
     {:noreply, check_for_lease_changes(state)}
   end
 
   @impl GenServer
   def handle_info({:DOWN, ref, :process, _pid, reason}, state) do
-    # A monitored shard process has terminated
     case Map.fetch(state.shard_ref_map, ref) do
       {:ok, shard_id} ->
         Logger.warning("Shard process for #{shard_id} terminated: #{inspect(reason)}")
 
-        # Clean up the reference
         new_shard_ref_map = Map.delete(state.shard_ref_map, ref)
 
-        # Check if we still own the lease before restarting
         new_state =
           case AppState.get_lease(state.app_name, shard_id, state.app_state_opts) do
             %{lease_owner: owner} when owner == state.worker_id ->
-              # We still own the lease, restart the shard
               Logger.info("Still own lease for shard #{shard_id}, restarting process")
 
               restart_shard(
@@ -140,7 +127,6 @@ defmodule KinesisClient.Stream.ShardManager do
               )
 
             lease ->
-              # Update current_leases with the latest info
               current_leases =
                 if lease != :not_found,
                   do: Map.put(state.current_leases, shard_id, lease),
@@ -153,64 +139,49 @@ defmodule KinesisClient.Stream.ShardManager do
         {:noreply, new_state}
 
       :error ->
-        # Unknown reference, ignore
         {:noreply, state}
     end
   end
 
-  # Private functions
-
-  # Schedule the next lease check
   defp schedule_lease_check(interval) do
     Process.send_after(self(), :check_lease_changes, interval)
   end
 
-  # Core logic for checking lease changes
   defp check_for_lease_changes(state) do
-    # Get all leases currently assigned to this worker
     my_leases = AppState.list_worker_leases(state.app_name, state.worker_id)
 
-    # Convert to map for easier lookups
     my_lease_map =
       Enum.reduce(my_leases, %{}, fn lease, acc ->
         Map.put(acc, lease.shard_id, lease)
       end)
 
-    # 1. Find new leases assigned to us
     new_leases =
       Enum.filter(my_leases, fn lease ->
         not Map.has_key?(state.current_leases, lease.shard_id)
       end)
 
-    # 2. Find leases no longer assigned to us
     old_leases =
       Enum.filter(Map.keys(state.current_leases), fn shard_id ->
         case Map.get(my_lease_map, shard_id) do
           nil ->
-            # Lease not in current assignments
             true
 
           %ShardLease{completed: true} ->
-            # Lease is now completed
             true
 
           _ ->
-            # Lease still assigned and not completed
             false
         end
       end)
 
-    # Start processing for new leases
     Enum.each(new_leases, fn lease ->
       handle_new_lease(lease, state)
     end)
 
-    # Stop processing for old leases
     Enum.each(old_leases, fn shard_id ->
       handle_old_lease(shard_id, state)
     end)
 
-    # Create new state with updated lease tracking
     new_state = %{
       state
       | current_leases: my_lease_map,
@@ -225,12 +196,10 @@ defmodule KinesisClient.Stream.ShardManager do
     shard_id = lease.shard_id
     Logger.info("New lease assigned for shard #{shard_id}")
 
-    # Check if we're already running this shard
     existing_ref = Enum.find(state.shard_ref_map, fn {_ref, id} -> id == shard_id end)
 
     case existing_ref do
       nil ->
-        # Start the shard
         case start_shard(shard_id, state) do
           {:ok, _pid} ->
             Logger.info("Started processing for shard #{shard_id}")
@@ -248,10 +217,8 @@ defmodule KinesisClient.Stream.ShardManager do
   defp handle_old_lease(shard_id, state) do
     Logger.info("Lease no longer assigned for shard #{shard_id}")
 
-    # Stop the shard process if it's running
     stop_shard(state.stream_name, shard_id)
 
-    # Clean up references
     {ref, _} = remove_shard_reference(shard_id, state.shard_ref_map)
     if ref, do: Process.demonitor(ref, [:flush])
   end

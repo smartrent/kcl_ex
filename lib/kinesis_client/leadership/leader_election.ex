@@ -16,16 +16,6 @@ defmodule KinesisClient.LeaderElection do
   alias KinesisClient.Leadership.AppState
 
   @leader_table_suffix "_leader_lock"
-  # 30 seconds lease duration, similar to KCL 3.x
-  @leader_lease_duration_ms 30_000
-  # 3 seconds heartbeat interval - more frequent than expiry for reliability
-  @heartbeat_interval_ms 3_000
-  # 5 seconds grace period before takeover attempts
-  @takeover_grace_period_ms 5_004
-  # Track consecutive failures for leader abandonment
-  @max_consecutive_failures 3
-
-  # Client API
 
   @doc """
   Starts the leader election process.
@@ -61,6 +51,7 @@ defmodule KinesisClient.LeaderElection do
     app_name = Keyword.fetch!(opts, :app_name)
     worker_id = Keyword.fetch!(opts, :worker_id)
     dynamo_opts = Keyword.get(opts, :dynamo_opts, [])
+    config = Keyword.fetch!(opts, :config)
 
     # Generate leader table name
     leader_table = leader_table_name(app_name)
@@ -83,6 +74,7 @@ defmodule KinesisClient.LeaderElection do
        leader_table: leader_table,
        worker_id: worker_id,
        dynamo_opts: dynamo_opts,
+       config: config,
        is_leader: false,
        current_leader: nil,
        heartbeat_timer: nil,
@@ -103,51 +95,46 @@ defmodule KinesisClient.LeaderElection do
 
     new_state =
       case leader_info do
-        # No current leader - try to become leader
         nil ->
           Logger.info("No current leader, attempting leadership acquisition")
           attempt_leadership_acquisition(state)
 
-        # Check if I'm already the leader
         %{"worker_id" => db_worker_id} ->
-          # Extract the worker_id if it's in DynamoDB format
           worker_id_str = extract_string(db_worker_id)
 
           if worker_id_str == state.worker_id do
-            # I'm the leader - continue heartbeating
-            # Check if our leadership record is recent enough
             current_time = System.system_time(:millisecond)
             last_update = Map.get(leader_info, "last_update", 0)
             last_update_value = extract_number(last_update)
 
-            # If our recorded leadership is stale, we might have been usurped
-            if current_time - last_update_value > @leader_lease_duration_ms do
+            if current_time - last_update_value > state.config[:leader_lease_duration_ms] do
               Logger.warning("Our leadership record is stale, checking if we're still leader")
               attempt_leadership_acquisition(state)
             else
-              # We're still the leader, ensure heartbeat is scheduled
               Logger.debug("I'm the leader, ensuring heartbeat is scheduled")
               ensure_heartbeat_scheduled(state)
             end
           else
-            # Another worker is the leader - check if it's expired
             current_time = System.system_time(:millisecond)
             last_update = Map.get(leader_info, "last_update", 0)
             last_update_value = extract_number(last_update)
 
             leader_expired =
               current_time - last_update_value >
-                @leader_lease_duration_ms + @takeover_grace_period_ms
+                state.config[:leader_lease_duration_ms] +
+                  state.config[:leader_takeover_grace_period_ms]
 
             if leader_expired do
-              # The leader has expired, try to take over
               Logger.info("Leader #{worker_id_str} expired, attempting takeover")
               attempt_leadership_acquisition(state)
             else
-              # Leader is still active, schedule next check
-              timer = Process.send_after(self(), :check_leadership, @heartbeat_interval_ms * 2)
+              timer =
+                Process.send_after(
+                  self(),
+                  :check_leadership,
+                  state.config[:leader_heartbeat_interval_ms] * 2
+                )
 
-              # Reset consecutive failures counter as things are working normally
               %{
                 state
                 | is_leader: false,
@@ -180,23 +167,20 @@ defmodule KinesisClient.LeaderElection do
              state.dynamo_opts
            ) do
         {:ok, _} ->
-          # Successfully sent heartbeat
           Logger.debug("Sent leadership heartbeat")
-          # Reset the consecutive failures counter
           new_state = %{state | consecutive_failures: 0}
 
-          # Schedule next heartbeat
-          timer = Process.send_after(self(), :send_heartbeat, @heartbeat_interval_ms)
+          timer =
+            Process.send_after(self(), :send_heartbeat, state.config[:leader_heartbeat_interval_ms])
+
           {:noreply, %{new_state | heartbeat_timer: timer}}
 
         {:error, reason} ->
-          # Failed to send heartbeat - we may have lost leadership
           Logger.warning("Failed to send leadership heartbeat: #{inspect(reason)}")
 
-          # Increment consecutive failures counter
           new_failures = state.consecutive_failures + 1
 
-          if new_failures >= @max_consecutive_failures do
+          if new_failures >= state.config[:leader_max_consecutive_failures] do
             # If we've failed too many times, abandon leadership
             Logger.error(
               "Too many consecutive heartbeat failures (#{new_failures}), abandoning leadership"
@@ -205,9 +189,8 @@ defmodule KinesisClient.LeaderElection do
             Process.send_after(self(), :abandon_leadership, 0)
             {:noreply, %{state | consecutive_failures: new_failures, heartbeat_timer: nil}}
           else
-            # Otherwise, try again
             Logger.warning(
-              "Heartbeat failure #{new_failures}/#{@max_consecutive_failures}, will retry"
+              "Heartbeat failure #{new_failures}/#{state.config[:leader_max_consecutive_failures]}, will retry"
             )
 
             # Check leadership status after a short delay
@@ -217,7 +200,6 @@ defmodule KinesisClient.LeaderElection do
       end
     else
       Logger.debug("Not the leader, skipping heartbeat")
-      # We're not the leader anymore
       {:noreply, %{state | heartbeat_timer: nil}}
     end
   end
@@ -246,8 +228,12 @@ defmodule KinesisClient.LeaderElection do
         Process.cancel_timer(state.heartbeat_timer)
       end
 
-      # Set state to non-leader and schedule a new leadership check
-      timer = Process.send_after(self(), :check_leadership, @heartbeat_interval_ms * 2)
+      timer =
+        Process.send_after(
+          self(),
+          :check_leadership,
+          state.config[:leader_heartbeat_interval_ms] * 2
+        )
 
       {:noreply,
        %{
@@ -258,7 +244,6 @@ defmodule KinesisClient.LeaderElection do
            consecutive_failures: 0
        }}
     else
-      # Not the leader, nothing to do
       {:noreply, state}
     end
   end
@@ -275,18 +260,16 @@ defmodule KinesisClient.LeaderElection do
            state.dynamo_opts
          ) do
       {:ok, _} ->
-        # Successfully became leader
         Logger.info("Worker #{inspect(state.worker_id)} acquired leadership")
 
-        # Start heartbeating
-        timer = Process.send_after(self(), :send_heartbeat, @heartbeat_interval_ms)
+        timer =
+          Process.send_after(self(), :send_heartbeat, state.config[:leader_heartbeat_interval_ms])
 
-        # Also schedule a leadership check as a backup
         check_timer =
           Process.send_after(
             self(),
             :check_leadership,
-            @leader_lease_duration_ms
+            state.config[:leader_lease_duration_ms]
           )
 
         %{
@@ -299,23 +282,27 @@ defmodule KinesisClient.LeaderElection do
         }
 
       {:error, reason} ->
-        # Failed to become leader
         Logger.debug("Failed to acquire leadership: #{inspect(reason)}")
 
-        # Schedule another check
-        timer = Process.send_after(self(), :check_leadership, @heartbeat_interval_ms * 2)
+        timer =
+          Process.send_after(
+            self(),
+            :check_leadership,
+            state.config[:leader_heartbeat_interval_ms] * 2
+          )
+
         %{state | is_leader: false, leadership_check_timer: timer}
     end
   end
 
   defp ensure_heartbeat_scheduled(%{heartbeat_timer: nil} = state) do
-    timer = Process.send_after(self(), :send_heartbeat, @heartbeat_interval_ms)
-    # Also schedule a leadership check as a backup
+    timer = Process.send_after(self(), :send_heartbeat, state.config[:leader_heartbeat_interval_ms])
+
     check_timer =
       Process.send_after(
         self(),
         :check_leadership,
-        @leader_lease_duration_ms
+        state.config[:leader_lease_duration_ms]
       )
 
     %{state | heartbeat_timer: timer, leadership_check_timer: check_timer}
@@ -341,18 +328,14 @@ defmodule KinesisClient.LeaderElection do
   end
 
   defp ensure_leader_table_exists(table_name, opts) do
-    # Check if table exists
     case AppState.describe_table(table_name, opts) do
       {:ok, _} ->
-        # Table exists
         :ok
 
       {:error, {"ResourceNotFoundException", _}} ->
-        # Create the table
         create_leader_table(table_name, opts)
 
       {:error, reason} ->
-        # Other error
         {:error, reason}
     end
   end
@@ -360,9 +343,7 @@ defmodule KinesisClient.LeaderElection do
   defp create_leader_table(table_name, opts) do
     Logger.info("Creating leader election table: #{table_name}")
 
-    # Extract required parameters for the table
     hash_key = "leader_key"
-    # "S" in DynamoDB terms
     key_schema = %{leader_key: :string}
     read_capacity = 5
     write_capacity = 5
@@ -376,7 +357,6 @@ defmodule KinesisClient.LeaderElection do
            opts
          ) do
       {:ok, _} ->
-        # Table created, wait for it to become active
         wait_for_table_active(table_name, opts)
 
       {:error, reason} ->
@@ -394,7 +374,6 @@ defmodule KinesisClient.LeaderElection do
           :ok
 
         {:ok, _} ->
-          # Table exists but not active yet
           Process.sleep(delay)
           wait_for_table_active(table_name, opts, retries - 1, delay)
 
@@ -408,7 +387,6 @@ defmodule KinesisClient.LeaderElection do
 
   defp name(app_name), do: :"#{__MODULE__}.#{app_name}"
 
-  # Helper function to safely extract numbers from DynamoDB responses
   defp extract_number(value) when is_integer(value), do: value
 
   defp extract_number(%{"N" => string_value}) when is_binary(string_value),
@@ -417,7 +395,6 @@ defmodule KinesisClient.LeaderElection do
   defp extract_number(value) when is_binary(value), do: String.to_integer(value)
   defp extract_number(_), do: 0
 
-  # Helper function to safely extract strings from DynamoDB responses
   defp extract_string(value) when is_binary(value), do: value
   defp extract_string(%{"S" => string_value}) when is_binary(string_value), do: string_value
   defp extract_string(value), do: inspect(value)

@@ -74,7 +74,6 @@ defmodule KinesisClient.Stream.Shard.Producer do
     {:producer, state}
   end
 
-  # Don't fetch from Kinesis if status is :stopped
   @impl GenStage
   def handle_demand(incoming_demand, %{demand: demand, status: :stopped} = state) do
     notify({:queuing_demand_while_stopped, incoming_demand}, state)
@@ -139,7 +138,6 @@ defmodule KinesisClient.Stream.Shard.Producer do
       state.app_state_opts
     )
 
-    # Execute telemetry event for successful message acknowledgment
     :telemetry.execute(
       [:kinesis_client, :shard, :processing, :ack, :success],
       %{
@@ -168,7 +166,6 @@ defmodule KinesisClient.Stream.Shard.Producer do
 
   @impl GenStage
   def handle_info({:ack, _ref, [], failed_msgs}, state) do
-    # Execute telemetry event for failed message acknowledgment
     :telemetry.execute(
       [:kinesis_client, :shard, :processing, :ack, :failure],
       %{
@@ -210,7 +207,6 @@ defmodule KinesisClient.Stream.Shard.Producer do
         state.app_state_opts
       )
 
-    # Execute telemetry event for partial message acknowledgment
     :telemetry.execute(
       [:kinesis_client, :shard, :processing, :ack, :partial],
       %{
@@ -253,7 +249,7 @@ defmodule KinesisClient.Stream.Shard.Producer do
   @impl GenStage
   def handle_call(:start, from, %{status: :stopped} = state) do
     Logger.info("Starting producer for shard #{state.shard_id}", ansi_color: :yellow_background)
-    # Execute telemetry event for shard processing start
+
     :telemetry.execute(
       [:kinesis_client, :shard, :processing, :start],
       %{count: 1, timestamp: System.system_time(:millisecond)},
@@ -298,21 +294,18 @@ defmodule KinesisClient.Stream.Shard.Producer do
     {:noreply, records, new_state}
   end
 
-  # Handle the case where a producer that's already started or in another state receives the start message
   @impl GenStage
   def handle_call(:start, from, state) do
     Logger.info("Received start message for shard #{state.shard_id} with status #{state.status}",
       ansi_color: :yellow_background
     )
 
-    # Producer is already in a non-stopped state, just acknowledge the start request
     GenStage.reply(from, :ok)
     {:noreply, [], state}
   end
 
   @impl GenStage
   def handle_call(:stop, _from, state) do
-    # Execute telemetry event for shard processing stop
     :telemetry.execute(
       [:kinesis_client, :shard, :processing, :end],
       %{timestamp: System.system_time(:millisecond)},
@@ -349,9 +342,7 @@ defmodule KinesisClient.Stream.Shard.Producer do
     end
   end
 
-  # Don't even make the API call if demand is 0
   defp get_records(%__MODULE__{demand: 0} = state) do
-    # No demand, no fetch needed
     Logger.debug("No demand for shard #{state.shard_id}, skipping get_records")
     {:noreply, [], state}
   end

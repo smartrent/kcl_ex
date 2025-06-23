@@ -1,7 +1,6 @@
 defmodule KinesisClient.Leadership.Adapter do
   @moduledoc """
   Behavior for DynamoDB operations needed for leader election.
-  This allows for easy mocking in tests.
   """
 
   @callback put_leader_item(String.t(), String.t(), integer(), Keyword.t()) ::

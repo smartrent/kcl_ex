@@ -61,7 +61,6 @@ defmodule KinesisClient.Worker.Dynamo do
       {:ok, workers} ->
         workers
         |> Enum.filter(fn worker ->
-          # Handle potential DynamoDB formatted timestamps
           last_heartbeat =
             case worker["last_heartbeat"] do
               %{"N" => timestamp_string} when is_binary(timestamp_string) ->
@@ -71,12 +70,10 @@ defmodule KinesisClient.Worker.Dynamo do
               timestamp when is_integer(timestamp) ->
                 timestamp
 
-              # Default to 0 (very old) if invalid format
               _ ->
                 0
             end
 
-          # Check if worker is marked inactive
           is_inactive =
             case worker["is_active"] do
               %{"BOOL" => false} -> true
@@ -84,11 +81,9 @@ defmodule KinesisClient.Worker.Dynamo do
               _ -> false
             end
 
-          # Worker is active if it has a recent heartbeat AND is not marked inactive
           last_heartbeat >= cutoff_time && !is_inactive
         end)
         |> Enum.map(fn worker ->
-          # Extract worker_id from potential DynamoDB format
           extract_worker_id(worker["worker_id"])
         end)
 
@@ -179,7 +174,6 @@ defmodule KinesisClient.Worker.Dynamo do
          )
          |> ExAws.request(opts) do
       {:ok, _} ->
-        # Table created, wait for it to become active
         wait_for_table_active(table_name, opts)
 
       {:error, reason} ->
@@ -197,7 +191,6 @@ defmodule KinesisClient.Worker.Dynamo do
           :ok
 
         {:ok, _} ->
-          # Table exists but not active yet
           Process.sleep(delay)
           wait_for_table_active(table_name, opts, retries - 1, delay)
 

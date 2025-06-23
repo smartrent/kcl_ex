@@ -9,10 +9,6 @@ defmodule KinesisClient.Worker.Service do
   alias KinesisClient.WorkerRegistry
   alias KinesisClient.LeaderElection
 
-  @heartbeat_interval_ms 5_000
-  @cleanup_interval_ms 30_000
-  @worker_timeout_ms 60_000
-
   # Client API
 
   @doc """
@@ -43,28 +39,26 @@ defmodule KinesisClient.Worker.Service do
     app_name = Keyword.fetch!(opts, :app_name)
     worker_id = Keyword.fetch!(opts, :worker_id)
     dynamo_opts = Keyword.get(opts, :dynamo_opts, [])
+    config = Keyword.fetch!(opts, :config)
 
-    # Initialize the worker registry
     :ok = WorkerRegistry.initialize(app_name, dynamo_opts)
 
-    # Schedule first heartbeat
-    schedule_heartbeat(heartbeat_interval_ms())
+    schedule_heartbeat(config[:worker_heartbeat_interval_ms])
 
-    # Schedule first cleanup
-    schedule_cleanup(cleanup_interval_ms())
+    schedule_cleanup(config[:worker_cleanup_interval_ms])
 
     {:ok,
      %{
        app_name: app_name,
        worker_id: worker_id,
        dynamo_opts: dynamo_opts,
+       config: config,
        last_heartbeat: nil
      }}
   end
 
   @impl GenServer
   def handle_info(:heartbeat, state) do
-    # Update registry with heartbeat
     result = WorkerRegistry.heartbeat(state.app_name, state.worker_id, state.dynamo_opts)
 
     case result do
@@ -75,8 +69,7 @@ defmodule KinesisClient.Worker.Service do
         Logger.warning("Failed to update worker registry: #{inspect(reason)}")
     end
 
-    # Schedule next heartbeat
-    schedule_heartbeat(heartbeat_interval_ms())
+    schedule_heartbeat(state.config[:worker_heartbeat_interval_ms])
 
     {:noreply, %{state | last_heartbeat: System.system_time(:millisecond)}}
   end
@@ -84,17 +77,13 @@ defmodule KinesisClient.Worker.Service do
   @impl GenServer
   def handle_info(:cleanup_stale_workers, state) do
     if KinesisClient.LeaderElection.is_leader?(state.app_name) do
-      # Only the leader cleans up stale workers
       Logger.debug("Cleaning up stale workers from registry")
 
-      # Calculate cutoff time for worker expiration
-      cutoff_time = System.system_time(:millisecond) - worker_timeout_ms()
+      cutoff_time = System.system_time(:millisecond) - state.config[:worker_timeout_ms]
 
-      # Get all workers
       all_workers = WorkerRegistry.list_all_workers(state.app_name, state.dynamo_opts)
       total_workers = length(all_workers)
 
-      # Filter for stale workers
       stale_workers =
         Enum.filter(all_workers, fn worker ->
           # Extract last_heartbeat value, converting from DynamoDB format if needed
@@ -139,7 +128,7 @@ defmodule KinesisClient.Worker.Service do
               Logger.info("Worker #{worker_id} is marked as inactive")
             else
               Logger.info(
-                "Worker #{worker_id} is stale - last heartbeat #{time_since_heartbeat}ms ago (threshold: #{worker_timeout_ms()}ms)"
+                "Worker #{worker_id} is stale - last heartbeat #{time_since_heartbeat}ms ago (threshold: #{state.config[:worker_timeout_ms]}ms)"
               )
             end
           end
@@ -168,7 +157,7 @@ defmodule KinesisClient.Worker.Service do
     end
 
     # Schedule next cleanup
-    schedule_cleanup(cleanup_interval_ms())
+    schedule_cleanup(state.config[:worker_cleanup_interval_ms])
 
     {:noreply, state}
   end
@@ -231,16 +220,4 @@ defmodule KinesisClient.Worker.Service do
   end
 
   defp name(app_name), do: :"#{__MODULE__}.#{app_name}"
-
-  defp heartbeat_interval_ms do
-    Application.get_env(:kcl_ex, :heartbeat_interval_ms, @heartbeat_interval_ms)
-  end
-
-  defp cleanup_interval_ms do
-    Application.get_env(:kcl_ex, :cleanup_interval_ms, @cleanup_interval_ms)
-  end
-
-  defp worker_timeout_ms do
-    Application.get_env(:kcl_ex, :worker_timeout_ms, @worker_timeout_ms)
-  end
 end

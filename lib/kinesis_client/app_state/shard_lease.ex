@@ -1,7 +1,6 @@
 defmodule KinesisClient.Stream.AppState.ShardLease do
   @moduledoc """
-  Stores information about the shard including its checkpoint value, throughput metrics,
-  and processing statistics used by KCL 3.x-style load-aware lease balancing.
+  Stores information about the shard including its checkpoint value
   """
   @derive ExAws.Dynamo.Encodable
 
