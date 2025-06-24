@@ -4,9 +4,6 @@ defmodule KinesisClient.Case do
 
   using do
     quote do
-      alias KinesisClient.KinesisMock
-      alias KinesisClient.Stream.AppStateMock
-      import KinesisClient.TestUtil
       import Mox
     end
   end

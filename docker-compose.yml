@@ -1,0 +1,30 @@
+# - Localstack compose docs: https://docs.localstack.cloud/getting-started/installation/#docker-compose
+#   - Image: https://hub.docker.com/r/localstack/localstack
+# - DynamoDBLocal docs: https://docs.aws.amazon.com/amazondynamodb/latest/developerguide/DynamoDBLocal.DownloadingAndRunning.html#:r10q:-trigger
+#   - Image: https://hub.docker.com/r/amazon/dynamodb-local
+services:
+  localstack:
+    container_name: "${LOCALSTACK_DOCKER_NAME:-localstack-main}"
+    image: localstack/localstack
+    ports:
+      - "127.0.0.1:4566:4566"            # LocalStack Gateway
+      - "127.0.0.1:4510-4559:4510-4559"  # external services port range
+    environment:
+      # LocalStack configuration: https://docs.localstack.cloud/references/configuration/
+      - DEBUG=${DEBUG:-0}
+    volumes:
+      - "localstack_data:/var/lib/localstack"
+      - "/var/run/docker.sock:/var/run/docker.sock"
+  dynamodb-local:
+    command: "-jar DynamoDBLocal.jar -sharedDb -dbPath ./data"
+    image: "amazon/dynamodb-local:latest"
+    container_name: dynamodb-local
+    ports:
+      - "8000:8000"
+    volumes:
+      - "dynamodb_data:/home/dynamodblocal/data"
+    working_dir: /home/dynamodblocal
+
+volumes:
+  localstack_data:
+  dynamodb_data:
